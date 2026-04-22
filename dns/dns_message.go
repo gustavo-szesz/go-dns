@@ -4,40 +4,7 @@ import (
 	"bytes"
 )
 
-// DNSMessage represent DNS DNSMessage
-// It means: it contains the Header, Questions, Answers, AuthorityRRs amd AdditionalRRs
-// =================== OFICIAL Docs ========================================
-// All communications inside of the domain protocol are carried in a single
-// format called a message.  The top level format of message is divided
-// into 5 sections (some of which are empty in certain cases) shown below:
-//
-//	+---------------------+
-//	|        Header       |
-//	+---------------------+
-//	|       Question      | the question for the name server
-//	+---------------------+
-//	|        Answer       | RRs answering the question
-//	+---------------------+
-//	|      Authority      | RRs pointing toward an authority
-//	+---------------------+
-//	|      Additional     | RRs holding additional information
-//	+---------------------+
-//
-// The header section is always present.  The header includes fields that
-// specify which of the remaining sections are present, and also specify
-// whether the message is a query or a response, a standard query or some
-// other opcode, etc.
-//
-// The names of the sections after the header are derived from their use in
-// standard queries.  The question section contains fields that describe a
-// question to a name server.  These fields are a query type (QTYPE), a
-// query class (QCLASS), and a query domain name (QNAME).  The last three
-// sections have the same format: a possibly empty list of concatenated
-// resource records (RRs).  The answer section contains RRs that answer the
-// question; the authority section contains RRs that point toward an
-// authoritative name server; the additional records section contains RRs
-// which relate to the query, but are not strictly answers for the
-// question.
+// DNSMessage represent DNS message (Header + sections)
 type DNSMessage struct {
 	Header        Header
 	Questions     []Question
@@ -46,8 +13,8 @@ type DNSMessage struct {
 	AdditionalRRs []ResourceRecord
 }
 
-// NewDNSMessage retuns *DNSMessage
-func NewDNSMessage(header Header, questions []Questions, records ...[]ResourceRecord) *DNSMessage {
+// NewDNSMessage returns *DNSMessage
+func NewDNSMessage(header Header, questions []Question, records ...[]ResourceRecord) *DNSMessage {
 	answers := make([]ResourceRecord, 0)
 	authorityRRs := make([]ResourceRecord, 0)
 	additionalRRs := make([]ResourceRecord, 0)
@@ -71,31 +38,21 @@ func NewDNSMessage(header Header, questions []Questions, records ...[]ResourceRe
 	}
 }
 
-// ToBytes is a casting of the DNSMessage into a ByteSlice
-// Returns the byte slice representation of the DNSMessage
+// ToBytes converts the DNSMessage into bytes.
 func (m *DNSMessage) ToBytes() []byte {
-	// New Buffer to store the bytes
 	buf := new(bytes.Buffer)
 
-	// Write tje header into the new buffer
 	buf.Write(m.Header.ToBytes())
 
-	// Write the questions to the buffer
 	for _, q := range m.Questions {
 		buf.Write(q.ToBytes())
 	}
-
-	// Write the Answers into the buffer
 	for _, a := range m.Answers {
 		buf.Write(a.ToBytes())
 	}
-
-	// Write the AuthorityRRs into the buffer
 	for _, rr := range m.AuthorityRRs {
 		buf.Write(rr.ToBytes())
 	}
-
-	// Write AdditionalRRs into the buffer
 	for _, rr := range m.AdditionalRRs {
 		buf.Write(rr.ToBytes())
 	}
@@ -103,12 +60,14 @@ func (m *DNSMessage) ToBytes() []byte {
 	return buf.Bytes()
 }
 
-// appenFromBufferUntilNull reads bytes from buffer until null
-// return read bytes as a bytes slice.
-func appenFromBufferUntilNull(buf *bytes.Buffer) []byte {
+// appendFromBufferUntilNull reads bytes from buffer until it reads 0x00 (inclusive).
+func appendFromBufferUntilNull(buf *bytes.Buffer) []byte {
 	data := make([]byte, 0)
 	for {
 		b := buf.Next(1)
+		if len(b) == 0 {
+			break
+		}
 		data = append(data, b[0])
 		if b[0] == 0 {
 			break
@@ -117,35 +76,37 @@ func appenFromBufferUntilNull(buf *bytes.Buffer) []byte {
 	return data
 }
 
-// DNSMessage from Bytes creates a DNSMessage from given bytes slice
-// return &DNSMessage
+// DNSMessageFromBytes parses a DNS message from raw bytes.
 func DNSMessageFromBytes(data []byte) *DNSMessage {
 	buf := bytes.NewBuffer(data)
 	bufCopy := bytes.NewBuffer(data)
 
-	// Read the header from the buffer
+	// Header (12 bytes)
 	header := HeaderFromBytes(buf.Next(12))
 
-	// Read the question from the buffer
-	questions := make([]Questions, header.QDCount)
+	// Questions
+	questions := make([]Question, header.QDCount)
 	for i := 0; i < int(header.QDCount); i++ {
-		questionsBytes := appenFromBufferUntilNull(buf)
-		questionsBytes = append(questionsBytes, buf.Next(4)...)
-		questions[i] = *ResourceRecordFromBytes(rrBytes, bufCopy)
+		qBytes := appendFromBufferUntilNull(buf)  // QNAME (ends with 0x00)
+		qBytes = append(qBytes, buf.Next(4)...)   // QTYPE + QCLASS
+		questions[i] = *QuestionFromBytes(qBytes) // parse question
 	}
 
+	// Answers
 	answers := make([]ResourceRecord, header.ANCount)
 	for i := 0; i < int(header.ANCount); i++ {
 		rrBytes := TrimResourceRecordBytes(buf)
 		answers[i] = *ResourceRecordFromBytes(rrBytes, bufCopy)
 	}
 
+	// Authority
 	authorityRRs := make([]ResourceRecord, header.NSCount)
-	for i := 0; i < int(header.ARCount); i++ {
+	for i := 0; i < int(header.NSCount); i++ {
 		rrBytes := TrimResourceRecordBytes(buf)
-		authorityRRs[i] := *ResourceRecordFromBytes(rrBytes, bufCopy)
+		authorityRRs[i] = *ResourceRecordFromBytes(rrBytes, bufCopy)
 	}
 
+	// Additional
 	additionalRRs := make([]ResourceRecord, header.ARCount)
 	for i := 0; i < int(header.ARCount); i++ {
 		rrBytes := TrimResourceRecordBytes(buf)

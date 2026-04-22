@@ -45,7 +45,7 @@ func NewHeader(id, flags, qdCount, anCount, nsCount, arCount uint16) *Header {
 }
 
 func (h *Header) ToBytes() []byte {
-	buf := new(byte.Buffer)
+	buf := new(bytes.Buffer)
 
 	binary.Write(buf, binary.BigEndian, h.ID)
 	binary.Write(buf, binary.BigEndian, h.Flags)

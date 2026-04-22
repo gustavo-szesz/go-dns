@@ -34,19 +34,40 @@ func NewResourceRecord(name string, rType uint16, class uint16, ttl uint32, rdLe
 	}
 }
 
-// TrimResourceRecordBytes appends bytes from the buffer until it completely parses all the bytes of a resource record.
-// It is useful to trim the bytes of a resource record from a buffer.
+// TrimResourceRecordBytes appends bytes from the buffer until it completely parses
+// all the bytes of a resource record.
+// Supports NAME as labels ending with 0x00 OR compression pointer (0xC0xx).
 func TrimResourceRecordBytes(buf *bytes.Buffer) []byte {
-	rrBytes := appendFromBufferUntilNull(buf)
-	rrBytes = append(rrBytes, buf.Next(7)...) // appending until ttl
-	rdLength := buf.Next(2)
-	rrBytes = append(rrBytes, rdLength...) // appending rdLength
-	rdLengthCasted := binary.BigEndian.Uint16(rdLength)
-	rrBytes = append(rrBytes, buf.Next(int(rdLengthCasted))...) // appending rdata
+	rrBytes := make([]byte, 0)
+
+	// NAME: labels ending with 0x00 OR compression pointer 0xC0xx (2 bytes)
+	if buf.Len() == 0 {
+		return rrBytes
+	}
+
+	b0 := buf.Bytes()[0]
+	if (b0 >> 6) == 0b11 {
+		rrBytes = append(rrBytes, buf.Next(2)...)
+	} else {
+		rrBytes = append(rrBytes, appendFromBufferUntilNull(buf)...)
+	}
+
+	// TYPE(2) + CLASS(2) + TTL(4) = 8
+	rrBytes = append(rrBytes, buf.Next(8)...)
+
+	// RDLENGTH(2)
+	rdLenBytes := buf.Next(2)
+	rrBytes = append(rrBytes, rdLenBytes...)
+	rdLen := binary.BigEndian.Uint16(rdLenBytes)
+
+	// RDATA(rdLen)
+	rrBytes = append(rrBytes, buf.Next(int(rdLen))...)
+
 	return rrBytes
 }
 
 // ToBytes converts the ResourceRecord to a byte slice.
+
 func (rr *ResourceRecord) ToBytes() []byte {
 	buf := new(bytes.Buffer)
 
@@ -63,23 +84,29 @@ func (rr *ResourceRecord) ToBytes() []byte {
 // ResourceRecordFromBytes creates a ResourceRecord from a byte slice.
 func ResourceRecordFromBytes(data []byte, messageBufs ...*bytes.Buffer) *ResourceRecord {
 	buf := bytes.NewBuffer(data)
+
 	var messageBuf *bytes.Buffer
 	if messageBufs != nil {
 		messageBuf = messageBufs[0]
 	}
 
-	name := appendFromBufferUntilNull(buf)
-	nameLength := len(name) - 1
-	decodedName, err := DecodeName(string(name), messageBuf)
+	nameBytes := appendFromBufferUntilNull(buf)
+	decodedName, err := DecodeName(string(nameBytes), messageBuf)
 	if err != nil {
 		fmt.Printf("Failed to decode the name: %v\n", err)
 	}
 
-	typ := binary.BigEndian.Uint16(data[nameLength : nameLength+2])
-	class := binary.BigEndian.Uint16(data[nameLength+2 : nameLength+4])
-	ttl := binary.BigEndian.Uint32(data[nameLength+4 : nameLength+8])
-	rdLength := binary.BigEndian.Uint16(data[nameLength+8 : nameLength+10])
-	rData := data[nameLength+10 : nameLength+10+int(rdLength)] // 10 is the length of the fields before RData
+	typBytes := buf.Next(2)
+	classBytes := buf.Next(2)
+	ttlBytes := buf.Next(4)
+	rdLengthBytes := buf.Next(2)
+
+	typ := binary.BigEndian.Uint16(typBytes)
+	class := binary.BigEndian.Uint16(classBytes)
+	ttl := binary.BigEndian.Uint32(ttlBytes)
+	rdLength := binary.BigEndian.Uint16(rdLengthBytes)
+
+	rData := buf.Next(int(rdLength))
 	rDataParsed, _ := parseRData(typ, rData, messageBuf)
 
 	return &ResourceRecord{

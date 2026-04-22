@@ -26,9 +26,9 @@ import (
 //	+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
 type Question struct {
 	Name   string // Domain name
-	QName  string // RFC 1035
+	QName  string // RFC 1035 (encoded name)
 	QType  uint16 // Question type
-	QClass uint16 // Question class1
+	QClass uint16 // Question class
 }
 
 // NewQuestion creates a new Question instance with the specified parameters.
@@ -50,18 +50,23 @@ func (q *Question) SetName(name string) {
 
 // encodeName encodes the domain name to the format specified in RFC 1035.
 func encodeName(name string) string {
+	name = strings.TrimSuffix(name, ".")
 	domainParts := strings.Split(name, ".")
 	qname := ""
 	for _, part := range domainParts {
-		newDomainPart := string(byte(len(part))) + part
-		qname += newDomainPart
+		if part == "" {
+			continue
+		}
+		qname += string(byte(len(part))) + part
 	}
 	return qname + "\x00"
 }
 
 // DecodeName decodes the encoded domain name to its original format.
+// Supports RFC1035 name compression pointers (0b11xxxxxx xxxxxxxx).
 func DecodeName(qname string, messageBufs ...*bytes.Buffer) (string, error) {
 	encoded := []byte(qname)
+
 	var result bytes.Buffer
 	var messageBuf *bytes.Buffer
 	if messageBufs != nil {
@@ -69,32 +74,51 @@ func DecodeName(qname string, messageBufs ...*bytes.Buffer) (string, error) {
 	}
 
 	for i := 0; i < len(encoded); {
+		if i >= len(encoded) {
+			break
+		}
+
+		// compression pointer: two bytes, first two bits are 11
+		if (encoded[i] >> 6) == 0b11 {
+			if messageBuf == nil {
+				return "", fmt.Errorf("name compression pointer encountered but message buffer not provided")
+			}
+			if i+1 >= len(encoded) {
+				return "", fmt.Errorf("invalid compression pointer (truncated)")
+			}
+
+			offset := (int(encoded[i]&0x3F) << 8) | int(encoded[i+1])
+			msg := messageBuf.Bytes()
+			if offset < 0 || offset >= len(msg) {
+				return "", fmt.Errorf("compression pointer out of range: %d", offset)
+			}
+
+			pointed := msg[offset:]
+			nameBytes := appendFromBufferUntilNull(bytes.NewBuffer(pointed))
+
+			n, err := DecodeName(string(nameBytes), messageBuf)
+			if err != nil {
+				return "", err
+			}
+			if n != "" {
+				if result.Len() > 0 {
+					result.WriteByte('.')
+				}
+				result.WriteString(n)
+			}
+			break // pointer terminates the current name
+		}
+
 		length := int(encoded[i])
 		if length == 0 {
 			break
 		}
-		if encoded[i]>>6 == 0b11 && messageBuf != nil {
-			// Check if the name is a pointer. Parse the pointer, get the offset and parse the name from the offset.
-			// See https://datatracker.ietf.org/doc/html/rfc1035#section-4.1.4 for more information
-			b := encoded[i+1]
-			offset := int(b & 0b11111111)
-			messageBytes := messageBuf.Bytes()
-			messageBytes = messageBytes[offset:]
-			name := appendFromBufferUntilNull(bytes.NewBuffer(messageBytes))
-			n, _ := DecodeName(string(name))
-			name = []byte(n)
-			length = len(name)
-			if result.Len() > 0 {
-				result.WriteByte('.')
-			}
-			result.Write(name)
-			i += length
-			break
-		}
+
 		i++
 		if i+length > len(encoded) {
 			return "", fmt.Errorf("invalid encoded domain name")
 		}
+
 		if result.Len() > 0 {
 			result.WriteByte('.')
 		}
@@ -110,8 +134,8 @@ func (q *Question) ToBytes() []byte {
 	buf := new(bytes.Buffer)
 
 	buf.Write([]byte(q.QName))
-	binary.Write(buf, binary.BigEndian, q.QType)
-	binary.Write(buf, binary.BigEndian, q.QClass)
+	_ = binary.Write(buf, binary.BigEndian, q.QType)
+	_ = binary.Write(buf, binary.BigEndian, q.QClass)
 
 	return buf.Bytes()
 }
