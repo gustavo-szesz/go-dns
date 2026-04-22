@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 )
 
 // ResourceRecord represents a DNS resource record.
@@ -90,7 +91,13 @@ func ResourceRecordFromBytes(data []byte, messageBufs ...*bytes.Buffer) *Resourc
 		messageBuf = messageBufs[0]
 	}
 
-	nameBytes := appendFromBufferUntilNull(buf)
+	var nameBytes []byte
+	if buf.Len() >= 2 && (buf.Bytes()[0]>>6) == 0b11 {
+		// compressed NAME (pointer): exactly two bytes
+		nameBytes = buf.Next(2)
+	} else {
+		nameBytes = appendFromBufferUntilNull(buf)
+	}
 	decodedName, err := DecodeName(string(nameBytes), messageBuf)
 	if err != nil {
 		fmt.Printf("Failed to decode the name: %v\n", err)
@@ -182,7 +189,7 @@ func parseRData(rType uint16, rData []byte, messageBufs ...*bytes.Buffer) (strin
 	case TypeCNAME:
 		return parseCNAME(rData, messageBufs...)
 	case TypeMX:
-		return parseMX(rData)
+		return parseMX(rData, messageBufs...)
 	case TypeNS:
 		return parseNS(rData, messageBufs...)
 	case TypePTR:
@@ -192,7 +199,7 @@ func parseRData(rType uint16, rData []byte, messageBufs ...*bytes.Buffer) (strin
 	case TypeSRV:
 		return parseSRV(rData)
 	case TypeTXT:
-		return "", fmt.Errorf("TXT resource record is not supported")
+		return parseTXT(rData)
 	default:
 		return "", fmt.Errorf("unknown resource record type: %d", rType)
 	}
@@ -229,13 +236,19 @@ func parseCNAME(rData []byte, messageBufs ...*bytes.Buffer) (string, error) {
 }
 
 // parseMX parses the MX resource record.
-func parseMX(rData []byte) (string, error) {
+func parseMX(rData []byte, messageBufs ...*bytes.Buffer) (string, error) {
 	if len(rData) < 2 {
 		return "", fmt.Errorf("invalid MX record length: %d", len(rData))
 	}
 
 	priority := binary.BigEndian.Uint16(rData[0:2])
-	name := string(rData[2:])
+	name, err := DecodeName(string(rData[2:]), messageBufs...)
+	if err != nil {
+		return "", fmt.Errorf("invalid MX exchange: %w", err)
+	}
+	if name == "" {
+		name = "."
+	}
 	return fmt.Sprintf("%d %s", priority, name), nil
 }
 
@@ -271,4 +284,24 @@ func parseSRV(rData []byte) (string, error) {
 	port := binary.BigEndian.Uint16(rData[4:6])
 	name := string(rData[6:])
 	return fmt.Sprintf("%d %d %d %s", priority, weight, port, name), nil
+}
+
+// parseTXT parses TXT records as one or more RFC1035 character-strings.
+func parseTXT(rData []byte) (string, error) {
+	if len(rData) == 0 {
+		return "", fmt.Errorf("invalid TXT record length: %d", len(rData))
+	}
+
+	parts := make([]string, 0, 1)
+	for i := 0; i < len(rData); {
+		l := int(rData[i])
+		i++
+		if i+l > len(rData) {
+			return "", fmt.Errorf("invalid TXT record data")
+		}
+		parts = append(parts, string(rData[i:i+l]))
+		i += l
+	}
+
+	return strings.Join(parts, ""), nil
 }
